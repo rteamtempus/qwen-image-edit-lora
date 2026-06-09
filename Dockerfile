@@ -31,17 +31,16 @@ RUN wget -q https://huggingface.co/Comfy-Org/Qwen-Image_ComfyUI/resolve/main/spl
 RUN wget -q https://huggingface.co/Comfy-Org/Qwen-Image_ComfyUI/resolve/main/split_files/vae/qwen_image_vae.safetensors -O /ComfyUI/models/vae/qwen_image_vae.safetensors
 
 # ============================================================================
-# YOUR LoRAs
+# YOUR LoRAs (baked into the image)
 # ----------------------------------------------------------------------------
-# Option A (bake into the image): uncomment one line per LoRA, using a DIRECT
-# download URL (Hugging Face "resolve" links work; Civitai needs ?token=YOUR_TOKEN).
-# Reference it in requests by filename, e.g. "loras": [{"name":"my_style.safetensors"}].
+# Drop .safetensors files into the ./my_loras folder in this repo — they get
+# copied into ComfyUI's loras folder here. Reference them by filename, e.g.
+# "loras": [{"name":"my_style.safetensors"}]. (GitHub limit: <100MB per file.)
+COPY my_loras/ /ComfyUI/models/loras/
 #
+# For LoRAs >100MB, host on Hugging Face instead and uncomment a line like:
 #   RUN wget -q "https://huggingface.co/USER/REPO/resolve/main/my_style.safetensors" \
 #        -O /ComfyUI/models/loras/my_style.safetensors
-#
-# Option B (no rebuild): attach a RunPod Network Volume to the endpoint and put
-# your .safetensors in its /loras folder — entrypoint.sh wires it up automatically.
 # ============================================================================
 
 COPY . .
