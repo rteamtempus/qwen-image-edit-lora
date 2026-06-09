@@ -1,0 +1,11 @@
+{
+  "input": {
+    "prompt": "combine three images with vintage look",
+    "image_url": "https://example.com/image1.jpg",
+    "image_url_2": "https://example.com/image2.jpg",
+    "image_url_3": "https://example.com/image3.jpg",
+    "seed": 42,
+    "width": 768,
+    "height": 768
+  }
+}

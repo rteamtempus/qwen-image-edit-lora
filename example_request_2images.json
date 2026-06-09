@@ -1,0 +1,10 @@
+{
+  "input": {
+    "prompt": "blend subject A and subject B, cinematic lighting",
+    "image_path": "/network_volume/img_a.jpg",
+    "image_url_2": "https://example.com/img_b.jpg",
+    "seed": 7777,
+    "width": 1024,
+    "height": 1024
+  }
+}

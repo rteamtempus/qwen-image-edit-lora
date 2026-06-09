@@ -1,0 +1,18 @@
+{
+    "title": "Qwen_image_edit",
+    "description": "Qwen_image_edit is a model that allows you to edit images using Qwen.",
+    "type": "serverless",
+    "category": "image",
+    "iconUrl": "https://github.com/wlsdml1114/Engui_Studio/blob/main/assets/logo.png?raw=true",
+  
+    "config": {
+      "runsOn": "GPU",
+      "containerDiskInGb": 180,
+  
+      "gpuCount": 1,
+      "gpuIds": "ADA_24,ADA_32_PRO",
+      "allowedCudaVersions": [
+        "12.8"
+      ]
+    }
+}

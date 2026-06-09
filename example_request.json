@@ -1,0 +1,9 @@
+{
+  "input": {
+    "prompt": "add watercolor style, soft pastel tones",
+    "image_url": "https://example.com/your-reference-image.jpg",
+    "seed": 12345,
+    "width": 768,
+    "height": 1024
+  }
+}
