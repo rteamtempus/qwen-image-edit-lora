@@ -11,6 +11,7 @@ import urllib.parse
 import binascii # Base64 에러 처리를 위해 import
 import subprocess
 import time
+import hashlib
 
 
 # 로깅 설정
@@ -151,6 +152,7 @@ _NODE_IMAGE_3 = "119"
 _NODE_SEED = "3"
 _NODE_PROMPT = "111"
 _NODE_SAMPLING = "66"  # ModelSamplingAuraFlow — user LoRAs are chained in just before this
+_NODE_MODEL = "37"     # UNETLoader — swap unet_name to use a custom Qwen-Image-Edit model
 _NODE_WIDTH = "128"   # 현재 워크플로우에는 없음(선택 적용)
 _NODE_HEIGHT = "129"  # 현재 워크플로우에는 없음(선택 적용)
 
@@ -207,6 +209,39 @@ def save_base64_to_file(base64_data, temp_dir, output_filename):
     except (binascii.Error, ValueError) as e:
         logger.error(f"❌ Base64 디코딩 실패: {e}")
         raise Exception(f"Base64 디코딩 실패: {e}")
+
+def _models_dir(subdir):
+    """Where to store a model/LoRA so ComfyUI can find it.
+    Prefer the attached Network Volume (persists across workers); else the image dir.
+    """
+    vol = f"/runpod-volume/{subdir}"
+    if os.path.isdir("/runpod-volume"):
+        return vol
+    return f"/ComfyUI/models/{subdir}"
+
+def ensure_model_file(url_or_name, subdir):
+    """Resolve a LoRA/model reference to a filename ComfyUI can load.
+    - If it's a filename, return it as-is (must already be staged on the volume/image).
+    - If it's an http(s) URL, download it (cached) into the volume/image and return
+      the filename. Re-uses the file on subsequent requests/workers.
+    """
+    if not url_or_name:
+        return None
+    s = str(url_or_name).strip()
+    if s.startswith("http://") or s.startswith("https://"):
+        base = os.path.basename(urllib.parse.urlparse(s).path) or ""
+        if not base.lower().endswith(".safetensors"):
+            base = "dl_" + hashlib.sha1(s.encode("utf-8")).hexdigest()[:12] + ".safetensors"
+        target_dir = _models_dir(subdir)
+        os.makedirs(target_dir, exist_ok=True)
+        dest = os.path.join(target_dir, base)
+        if os.path.exists(dest) and os.path.getsize(dest) > 0:
+            logger.info(f"♻️  Reusing cached {subdir}: {dest}")
+        else:
+            logger.info(f"⬇️  Downloading {subdir} from {s} -> {dest}")
+            download_file_from_url(s, dest)
+        return base
+    return s  # already a filename staged on the volume/image
 
 def handler(job):
     job_input = job.get("input", {})
@@ -266,16 +301,34 @@ def handler(job):
         prompt[_NODE_HEIGHT]["inputs"]["value"] = job_input["height"]
 
     # ------------------------------
+    # Custom base model (optional).
+    # Swap node 37's diffusion model. Pass a filename already staged on the volume
+    # (or image), or a URL to download+cache. Must be a Qwen-Image-Edit-compatible
+    # model, or the text-encoder/VAE nodes will mismatch.
+    #   "model_name": "my_qwen_finetune.safetensors"   (pre-staged)
+    #   "model_url":  "https://.../my_qwen_finetune.safetensors"  (download+cache; large!)
+    # ------------------------------
+    model_ref = job_input.get("model_name") or job_input.get("model_url") or job_input.get("model")
+    if model_ref and _NODE_MODEL in prompt:
+        try:
+            fname = ensure_model_file(model_ref, "diffusion_models")
+            if fname:
+                prompt[_NODE_MODEL]["inputs"]["unet_name"] = fname
+                logger.info(f"🧠 Using custom base model: {fname}")
+        except Exception as e:
+            return {"error": f"Failed to load model '{model_ref}': {e}"}
+
+    # ------------------------------
     # LoRA support (model-only).
     # The base graph is: UNETLoader(37) -> LoraLoaderModelOnly(89, Lightning speed
     # LoRA) -> ModelSamplingAuraFlow(66) -> ... -> KSampler.
     # We stack user LoRAs ON TOP of the existing chain by inserting extra
     # LoraLoaderModelOnly nodes right before node 66 (so the Lightning LoRA is kept).
-    # Accepts either of:
-    #   "loras": [ {"name": "my_lora.safetensors", "strength": 1.0}, ... ]   (up to a few)
-    #   "lora": "my_lora.safetensors", "lora_strength": 1.0                  (single, convenience)
-    # LoRA files must exist in ComfyUI/models/loras (baked into the image) OR in the
-    # /loras folder of an attached Network Volume. Reference them by filename only.
+    # Each LoRA may be referenced by filename (staged on the volume/image) or by URL
+    # (downloaded + cached onto the volume on first use). Accepts:
+    #   "loras": [ {"name": "x.safetensors", "strength": 1.0},
+    #              {"url": "https://.../y.safetensors", "strength": 0.8} ]
+    #   "lora": "x.safetensors" (or a URL), "lora_strength": 1.0   (single convenience)
     # ------------------------------
     loras = job_input.get("loras")
     if not loras and job_input.get("lora"):
@@ -288,11 +341,22 @@ def handler(job):
             next_id = 9001
             applied = 0
             for lora in loras:
-                name = lora.get("name") if isinstance(lora, dict) else lora
+                if isinstance(lora, dict):
+                    ref = lora.get("name") or lora.get("url")
+                    strength_raw = lora.get("strength", 1.0)
+                else:
+                    ref = lora
+                    strength_raw = 1.0
+                if not ref:
+                    continue
+                try:
+                    name = ensure_model_file(ref, "loras")
+                except Exception as e:
+                    return {"error": f"Failed to load LoRA '{ref}': {e}"}
                 if not name:
                     continue
                 try:
-                    strength = float(lora.get("strength", 1.0)) if isinstance(lora, dict) else 1.0
+                    strength = float(strength_raw)
                 except (TypeError, ValueError):
                     strength = 1.0
                 node_id = str(next_id)
@@ -305,7 +369,7 @@ def handler(job):
                 prev = [node_id, 0]
                 applied += 1
             prompt[chain_target]["inputs"]["model"] = prev
-            logger.info(f"🎨 Applied {applied} user LoRA(s): {loras}")
+            logger.info(f"🎨 Applied {applied} user LoRA(s)")
         else:
             logger.warning(f"Could not find node {_NODE_SAMPLING} to attach LoRAs; skipping LoRAs.")
 

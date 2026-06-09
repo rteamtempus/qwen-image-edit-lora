@@ -1,82 +1,64 @@
-# Adding LoRAs to this Qwen Image Edit worker
+# LoRAs & custom models on this Qwen Image Edit worker
 
-This fork adds **LoRA support** to the worker. You can apply one or more LoRAs on
-top of the model when editing an image.
+This fork lets you apply LoRAs (and swap the base model) at **request time**,
+loading the files from an attached **RunPod Network Volume** — so you mix-and-match
+freely with **no image rebuilds**.
 
 ## What changed
-
-- **`handler.py`** now accepts LoRAs in the request and chains them into the
-  ComfyUI graph (right before `ModelSamplingAuraFlow`, stacking on top of the
-  built-in Lightning speed LoRA). No effect when you don't pass any.
-- **`entrypoint.sh`** auto-detects a RunPod **Network Volume** and lets ComfyUI
-  load LoRAs from `<volume>/loras` — so you can add LoRAs **without rebuilding**.
-- **`Dockerfile`** has a marked spot to bake LoRAs into the image via `wget`.
+- **`handler.py`** accepts `loras` (and `model_name`/`model_url`) in the request and
+  wires them into the ComfyUI graph. LoRAs stack on top of the built-in Lightning
+  speed LoRA. References can be a **filename** (already on the volume) or a **URL**
+  (downloaded once and cached onto the volume).
+- **`entrypoint.sh`** auto-detects the Network Volume and points ComfyUI at
+  `<volume>/loras`, `<volume>/diffusion_models`, etc.
 
 ## Request format
 
-Reference LoRAs by **filename only**. Either form works:
-
 ```jsonc
-// one or more
-"loras": [
-  { "name": "my_style.safetensors", "strength": 0.9 },
-  { "name": "another.safetensors",  "strength": 0.6 }
-]
-
-// or the single-LoRA shorthand
-"lora": "my_style.safetensors",
-"lora_strength": 0.9
-```
-
-Full example:
-
-```json
 {
   "input": {
     "prompt": "make it an oil painting",
     "image_base64": "<...>",
-    "loras": [{ "name": "oil_painting_style.safetensors", "strength": 0.8 }]
+
+    // LoRAs — by filename (staged on the volume) and/or by URL (cached on first use)
+    "loras": [
+      { "name": "oil_style.safetensors", "strength": 0.8 },
+      { "url": "https://huggingface.co/USER/REPO/resolve/main/grain.safetensors", "strength": 0.5 }
+    ],
+
+    // optional: swap the base model (must be Qwen-Image-Edit compatible)
+    "model_name": "my_qwen_finetune.safetensors"
   }
 }
 ```
 
-`strength` defaults to `1.0`. Tip: the worker runs in 4 steps (Lightning LoRA),
-so very strong style LoRAs can fight it — start around `0.6–0.9`.
+Shorthand for a single LoRA: `"lora": "oil_style.safetensors"`, `"lora_strength": 0.8`.
+`strength` defaults to `1.0`. The worker runs in 4 steps (Lightning LoRA), so
+strong style LoRAs often look best around **0.6–0.9**.
 
-## Getting your LoRA files onto the endpoint
+## Putting files on the Network Volume
 
-### Option A — bake into the image (simplest first run)
-Best when your LoRA is at a **direct download URL**.
-1. In the **`Dockerfile`**, find the `YOUR LoRAs` block and uncomment a line:
-   ```dockerfile
-   RUN wget -q "https://huggingface.co/USER/REPO/resolve/main/my_style.safetensors" \
-        -O /ComfyUI/models/loras/my_style.safetensors
-   ```
-   (Hugging Face `resolve` links work as-is. Civitai needs `?token=YOUR_API_TOKEN`.)
-2. Rebuild/redeploy (below). Reference it as `my_style.safetensors`.
+Your files live in folders on the volume (mounted at `/runpod-volume` in the worker):
+- LoRAs → `loras/`
+- Custom base models → `diffusion_models/`
 
-### Option B — Network Volume (no rebuild to add more later)
-1. In RunPod: **Storage → Network Volume** (same region as your endpoint), attach
-   it to the endpoint.
-2. Put your `.safetensors` files in the volume's **`loras/`** folder.
-3. Reference them by filename. `entrypoint.sh` already points ComfyUI at the volume.
+Two ways to get them there:
 
-## Deploying (no Docker needed — RunPod builds from GitHub)
+1. **Pass a URL once** — easiest. Send a `url` (LoRA) or `model_url`. The worker
+   downloads it into the volume and **caches it**; reference it by filename after.
+2. **Upload directly** — spin up a cheap temporary Pod that mounts the volume,
+   drop your `.safetensors` into `loras/` (or `diffusion_models/`) via its file
+   browser/terminal, then stop the Pod.
 
-1. **Put this code on your own GitHub.** From this folder:
-   ```bash
-   git remote remove origin
-   git remote add origin https://github.com/<YOU>/qwen-image-edit-lora.git
-   git add -A
-   git commit -m "Add LoRA support"
-   git branch -M main
-   git push -u origin main
-   ```
-   (Create the empty repo on github.com first.)
-2. In **RunPod → Serverless → New Endpoint → “Import Git Repository”**, connect
-   GitHub and pick your repo/branch. RunPod builds the image for you.
-3. (If using a volume) attach your Network Volume to the endpoint.
-4. Copy the new **Endpoint ID** into the app's `.env` as `RUNPOD_ENDPOINT_ID`
-   and restart the app.
+After a file is on the volume, every future request/worker can use it by filename
+with **no download and no rebuild**.
 
-That's it — the app's edit requests can then include `loras`.
+## Deploying (RunPod builds from GitHub)
+1. Push this repo to your GitHub (already done if you're reading this in your fork).
+2. **Serverless → New Endpoint → Import Git Repository →** your repo. Set the region
+   to where your **Network Volume** lives (e.g. US-NC-1) and **attach the volume**.
+3. Copy the **Endpoint ID** into the app's `.env` (`RUNPOD_ENDPOINT_ID`) and restart.
+
+> Custom models must be **Qwen-Image-Edit-compatible** (same architecture), or the
+> text-encoder/VAE nodes won't match. Full models are large (~20 GB) — keep them on
+> the volume; don't expect to download one per request.
