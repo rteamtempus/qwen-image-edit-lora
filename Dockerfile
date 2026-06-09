@@ -33,14 +33,13 @@ RUN wget -q https://huggingface.co/Comfy-Org/Qwen-Image_ComfyUI/resolve/main/spl
 # ============================================================================
 # YOUR LoRAs (baked into the image)
 # ----------------------------------------------------------------------------
-# Drop .safetensors files into the ./my_loras folder in this repo — they get
-# copied into ComfyUI's loras folder here. Reference them by filename, e.g.
-# "loras": [{"name":"my_style.safetensors"}]. (GitHub limit: <100MB per file.)
+# Small LoRAs (<100MB) can be dropped into ./my_loras and committed.
 COPY my_loras/ /ComfyUI/models/loras/
 #
-# For LoRAs >100MB, host on Hugging Face instead and uncomment a line like:
-#   RUN wget -q "https://huggingface.co/USER/REPO/resolve/main/my_style.safetensors" \
-#        -O /ComfyUI/models/loras/my_style.safetensors
+# Larger LoRAs are pulled from Hugging Face at build time (reference by filename):
+RUN wget -q "https://huggingface.co/Rt5556/qwen-loras/resolve/main/lora_1.safetensors" \
+     -O /ComfyUI/models/loras/lora_1.safetensors
+# Add more "RUN wget ... -O /ComfyUI/models/loras/<name>.safetensors" lines as needed.
 # ============================================================================
 
 COPY . .
