@@ -8,6 +8,7 @@ import uuid
 import logging
 import urllib.request
 import urllib.parse
+import urllib.error
 import binascii # Base64 에러 처리를 위해 import
 import subprocess
 import time
@@ -84,7 +85,17 @@ def queue_prompt(prompt):
     p = {"prompt": prompt, "client_id": client_id}
     data = json.dumps(p).encode('utf-8')
     req = urllib.request.Request(url, data=data)
-    return json.loads(urllib.request.urlopen(req).read())
+    try:
+        return json.loads(urllib.request.urlopen(req).read())
+    except urllib.error.HTTPError as e:
+        # ComfyUI returns the validation detail (bad node/value, missing LoRA, etc.)
+        # in the response body — surface it instead of a bare "HTTP 400".
+        try:
+            body = e.read().decode('utf-8', 'replace')
+        except Exception:
+            body = ''
+        logger.error(f"ComfyUI /prompt rejected the workflow ({e.code}): {body}")
+        raise Exception(f"ComfyUI rejected the workflow ({e.code}). Detail: {body[:1000]}")
 
 def get_image(filename, subfolder, folder_type):
     url = f"http://{server_address}:8188/view"
@@ -111,6 +122,13 @@ def get_images(ws, prompt):
                 data = message['data']
                 if data['node'] is None and data['prompt_id'] == prompt_id:
                     break
+            elif message['type'] == 'execution_error':
+                d = message.get('data', {})
+                if d.get('prompt_id') == prompt_id:
+                    raise Exception(
+                        f"ComfyUI execution error in node {d.get('node_id')} "
+                        f"({d.get('node_type')}): {d.get('exception_message')}"
+                    )
         else:
             continue
 
