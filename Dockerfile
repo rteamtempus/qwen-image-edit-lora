@@ -39,6 +39,12 @@ COPY my_loras/ /ComfyUI/models/loras/
 # Larger LoRAs are pulled from Hugging Face at build time (reference by filename):
 RUN wget -q "https://huggingface.co/Rt5556/qwen-loras/resolve/main/lora_1.safetensors" \
      -O /ComfyUI/models/loras/lora_1.safetensors
+RUN wget -q "https://huggingface.co/Rt5556/qwen-loras/resolve/main/FElora_3.safetensors" \
+     -O /ComfyUI/models/loras/FElora_3.safetensors
+RUN wget -q "https://huggingface.co/Rt5556/qwen-loras/resolve/main/HAIlora_4.safetensors" \
+     -O /ComfyUI/models/loras/HAIlora_4.safetensors
+RUN wget -q "https://huggingface.co/Rt5556/qwen-loras/resolve/main/SGlora_2.safetensors" \
+     -O /ComfyUI/models/loras/SGlora_2.safetensors
 # Add more "RUN wget ... -O /ComfyUI/models/loras/<name>.safetensors" lines as needed.
 # ============================================================================
 
