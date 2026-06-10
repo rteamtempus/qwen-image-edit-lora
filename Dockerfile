@@ -36,12 +36,15 @@ RUN wget -q https://huggingface.co/Comfy-Org/Qwen-Image_ComfyUI/resolve/main/spl
 # Small LoRAs (<100MB) can be dropped into ./my_loras and committed.
 COPY my_loras/ /ComfyUI/models/loras/
 #
-# Your LoRAs are pulled from your Hugging Face repo at build time. This grabs ALL
-# .safetensors in the repo, so to add/remove a baked LoRA you just change the repo
-# and rebuild — NO Dockerfile edit needed. hf_transfer makes it download fast
-# (much quicker than wget, which helps stay under the build time limit).
-ENV HF_HUB_ENABLE_HF_TRANSFER=1
-RUN huggingface-cli download Rt5556/qwen-loras --include '*.safetensors' --local-dir /ComfyUI/models/loras
+# Your LoRAs, pulled from Hugging Face at build time. Downloaded in PARALLEL (the
+# trailing & runs them at once; `wait` fails the build if any download fails) so
+# the build stays under the time limit. To add/remove a baked LoRA, edit these
+# lines AND the KNOWN_LORAS chips in the app. Reference each by filename.
+RUN set -e; \
+    wget -q "https://huggingface.co/Rt5556/qwen-loras/resolve/main/lora_1.safetensors"      -O /ComfyUI/models/loras/lora_1.safetensors      & p1=$!; \
+    wget -q "https://huggingface.co/Rt5556/qwen-loras/resolve/main/FElora_3.safetensors"     -O /ComfyUI/models/loras/FElora_3.safetensors     & p2=$!; \
+    wget -q "https://huggingface.co/Rt5556/qwen-loras/resolve/main/natural_skin.safetensors" -O /ComfyUI/models/loras/natural_skin.safetensors & p3=$!; \
+    wait $p1; wait $p2; wait $p3
 # ============================================================================
 
 COPY . .
