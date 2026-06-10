@@ -11,4 +11,4 @@ filename in a request, e.g.:
 Notes:
 - **Each file must be under 100 MB** (GitHub's per-file limit). For larger LoRAs,
   host them on Hugging Face and use the `wget` example in the Dockerfile instead.
-- After adding/removing files here, commit + push, then redeploy the endpoint. 
+- After adding/removing files here, commit + push, then redeploy the endpoint.
