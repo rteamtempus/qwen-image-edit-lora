@@ -95,16 +95,18 @@ The `plan` is logged/returned for reproducibility and auditing.
 
 ## Planner model — verify before relying on it
 
-- The weights are **baked into the Docker image** (Dockerfile downloads
-  `Qwen/Qwen3-VL-8B-Instruct` to `/models/...` and sets `PLANNER_MODEL_ID` to that
-  path). So the worker needs **no Network Volume and isn't pinned to a region**, and
-  cold starts don't re-download — same pattern as the base diffusion models.
-  - Size lever: swap to `Qwen/Qwen3-VL-4B-Instruct` (~half the image size) if the
-    image gets too big or the hub build times out.
-  - Volume alternative (if you'd rather not grow the image): remove the bake step and
-    instead let it download at runtime — `entrypoint.sh` points `HF_HOME` at the volume
-    when one is attached, so the HF-id download is cached there. This re-pins you to a
-    region, which is why baking is the default here.
+- The VLM is **pulled from Hugging Face at runtime** on the first planned request and
+  cached on the worker's local disk. So the worker needs **no Network Volume and isn't
+  pinned to a region**, and the image stays small (baking a 16GB model blew the 30-min
+  hub build limit — that's why it's not baked).
+  - Default `PLANNER_MODEL_ID=Qwen/Qwen3-VL-4B-Instruct` (~8GB, plain bf16) keeps the
+    one-time per-worker download light. **Change the model with NO rebuild** by setting
+    `PLANNER_MODEL_ID` on the endpoint (e.g. `Qwen/Qwen3-VL-8B-Instruct` for more
+    capability, at a bigger download).
+  - Use **min-workers = 1** during a testing session so the download happens once and
+    the worker stays warm; otherwise every fresh worker re-downloads it.
+  - Want zero per-worker download? Either bake it into the image (fast cold starts but
+    fights the build limit) or stage it on a Network Volume (fast, but re-pins region).
 - **Confirm** the installed `transformers` supports the chosen Qwen3-VL revision. The
   loader tries `AutoModelForImageTextToText` then a few known class names.
 - **Instruct** edition for speed; switch to a Thinking edition only if directive

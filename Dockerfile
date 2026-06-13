@@ -25,13 +25,19 @@ RUN pip install -U "accelerate>=0.34" "transformers>=4.57.0"
 # at the local copy so there's zero HF call (and zero re-download) at runtime.
 # Size lever: swap to Qwen/Qwen3-VL-4B-Instruct (~half the size) if the image gets
 # too big or builds time out — it's usually enough for grounding + directives.
-ENV PLANNER_MODEL_ID=/models/Qwen3-VL-8B-Instruct
-# Download the VLM with the standard resumable downloader (NOT hf_transfer, which
-# fails opaquely with exit 1 the instant it can't import/connect). Doing it via
-# snapshot_download in Python means any failure prints a real traceback in the
-# build log instead of a bare "exit code: 1", and partial files resume on retry.
+# Pull the VLM at RUNTIME (on the first planned request), NOT at build time.
+# Baking a 16GB model blew the 30-minute hub build limit AND triggered flaky
+# registry layer-commit errors. Downloading at runtime keeps the image small so
+# builds are fast and reliable, and lets you swap the planner model by changing
+# PLANNER_MODEL_ID on the endpoint with NO rebuild.
+#
+# Default is the 4B (~8GB, plain bf16 — loads with no FP8 kernels) to keep the
+# one-time per-worker download light. To use a bigger/different VLM, just set
+# PLANNER_MODEL_ID on the endpoint (e.g. Qwen/Qwen3-VL-8B-Instruct). With no
+# Network Volume attached it caches on the worker's local disk (region-free);
+# use min-workers=1 during testing so the download only happens once.
 ENV HF_HUB_ENABLE_HF_TRANSFER=0
-RUN python3 -c "from huggingface_hub import snapshot_download; snapshot_download('Qwen/Qwen3-VL-8B-Instruct', local_dir='/models/Qwen3-VL-8B-Instruct', max_workers=4)"
+ENV PLANNER_MODEL_ID=Qwen/Qwen3-VL-4B-Instruct
 
 # Set working directory
 WORKDIR /

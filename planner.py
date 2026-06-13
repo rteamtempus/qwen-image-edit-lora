@@ -29,11 +29,12 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-# Repo id / local path of the planner VLM. The Dockerfile bakes the weights into
-# the image and sets PLANNER_MODEL_ID=/models/Qwen3-VL-8B-Instruct, so at runtime
-# this loads from a local path — no HF call, no volume, no region lock. The HF-id
-# fallback below only applies if the env var is unset (e.g. local dev). See PLANNER.md.
-PLANNER_MODEL_ID = os.getenv("PLANNER_MODEL_ID", "Qwen/Qwen3-VL-8B-Instruct")
+# Repo id (or local path) of the planner VLM. Pulled from HF at runtime on first
+# use and cached on the worker's local disk (no Network Volume, region-free). The
+# Dockerfile sets PLANNER_MODEL_ID=Qwen/Qwen3-VL-4B-Instruct; override it on the
+# endpoint to use a bigger model (e.g. Qwen/Qwen3-VL-8B-Instruct) with NO rebuild.
+# See PLANNER.md.
+PLANNER_MODEL_ID = os.getenv("PLANNER_MODEL_ID", "Qwen/Qwen3-VL-4B-Instruct")
 PLANNER_DEVICE = os.getenv("PLANNER_DEVICE", "cuda")
 # Max new tokens for the plan JSON. A dozen people with directives fits well under this.
 PLANNER_MAX_NEW_TOKENS = int(os.getenv("PLANNER_MAX_NEW_TOKENS", "1024"))
