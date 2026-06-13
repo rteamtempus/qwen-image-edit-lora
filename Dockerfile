@@ -7,6 +7,28 @@ RUN apt-get update && apt-get install -y wget && rm -rf /var/lib/apt/lists/*
 RUN pip install -U "huggingface_hub[hf_transfer]"
 RUN pip install runpod websocket-client librosa
 
+# --- VLM planner stage (per-subject randomized edits) ------------------------
+# The planned pipeline (handler.run_planned_edit → planner.py) loads a Qwen3-VL
+# instruct model via transformers to locate each person and write an individually
+# grounded directive. accelerate is needed for device_map; transformers must be
+# new enough to support Qwen3-VL.
+#
+# ⚠️ VERIFY: upgrading transformers can affect ComfyUI custom nodes. If a node
+# breaks, pin transformers to a version that supports BOTH (test the image), or
+# move the planner to its own endpoint. The base image already ships a
+# transformers; we upgrade it for Qwen3-VL support.
+RUN pip install -U "accelerate>=0.34" "transformers>=4.57.0"
+#
+# Bake the VLM weights INTO the image (same pattern as the base diffusion models
+# below) so the worker needs no Network Volume and isn't pinned to a region.
+# Downloaded once at build time via hf_transfer; PLANNER_MODEL_ID points planner.py
+# at the local copy so there's zero HF call (and zero re-download) at runtime.
+# Size lever: swap to Qwen/Qwen3-VL-4B-Instruct (~half the size) if the image gets
+# too big or builds time out — it's usually enough for grounding + directives.
+ENV HF_HUB_ENABLE_HF_TRANSFER=1
+ENV PLANNER_MODEL_ID=/models/Qwen3-VL-8B-Instruct
+RUN huggingface-cli download Qwen/Qwen3-VL-8B-Instruct --local-dir /models/Qwen3-VL-8B-Instruct
+
 # Set working directory
 WORKDIR /
 

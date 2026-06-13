@@ -74,6 +74,12 @@ runpod_volume:
     vae: vae/
     text_encoders: text_encoders/
 YAML
+    # Cache the VLM planner's Hugging Face downloads ON THE VOLUME so a Qwen3-VL
+    # model referenced by HF id is pulled once and reused across cold starts
+    # (instead of re-downloading tens of GB every time a worker spins up).
+    export HF_HOME=/runpod-volume/hf-cache
+    mkdir -p "$HF_HOME"
+    echo "🧠 HF_HOME set to $HF_HOME (planner weights cached on the volume)."
 fi
 
 # Start ComfyUI in the background

@@ -261,11 +261,242 @@ def ensure_model_file(url_or_name, subdir):
         return base
     return s  # already a filename staged on the volume/image
 
+# ============================================================================
+# Reusable graph-injection helpers (shared by the legacy single-edit path and
+# the per-person planned-edit loop). Each mutates the ComfyUI `prompt` graph.
+# ============================================================================
+def inject_model(prompt, model_ref):
+    """Swap node 37's diffusion model. Raises on download/resolve failure."""
+    if not model_ref or _NODE_MODEL not in prompt:
+        return None
+    fname = ensure_model_file(model_ref, "diffusion_models")
+    if fname:
+        prompt[_NODE_MODEL]["inputs"]["unet_name"] = fname
+        logger.info(f"🧠 Using custom base model: {fname}")
+    return fname
+
+
+def _normalize_loras(loras, lora, lora_strength=1.0):
+    """Accept either the `loras` array or the single `lora`/`lora_strength` shorthand."""
+    if not loras and lora:
+        return [{"name": lora, "strength": lora_strength}]
+    return loras or []
+
+
+def inject_loras(prompt, loras):
+    """Stack user LoRAs on top of the existing chain (keeps the built-in Lightning
+    LoRA) by inserting LoraLoaderModelOnly nodes right before ModelSamplingAuraFlow.
+    Returns the number applied. Raises on a download/resolve failure."""
+    if not loras:
+        return 0
+    chain_target = _NODE_SAMPLING  # ModelSamplingAuraFlow consumes the model
+    if chain_target not in prompt or "model" not in prompt[chain_target].get("inputs", {}):
+        logger.warning(f"Could not find node {_NODE_SAMPLING} to attach LoRAs; skipping LoRAs.")
+        return 0
+    prev = prompt[chain_target]["inputs"]["model"]  # e.g. ["89", 0]
+    next_id = 9001
+    applied = 0
+    for lora in loras:
+        if isinstance(lora, dict):
+            ref = lora.get("name") or lora.get("url")
+            strength_raw = lora.get("strength", 1.0)
+        else:
+            ref = lora
+            strength_raw = 1.0
+        if not ref:
+            continue
+        name = ensure_model_file(ref, "loras")  # may raise → caller converts to error
+        if not name:
+            continue
+        try:
+            strength = float(strength_raw)
+        except (TypeError, ValueError):
+            strength = 1.0
+        node_id = str(next_id)
+        next_id += 1
+        prompt[node_id] = {
+            "inputs": {"lora_name": name, "strength_model": strength, "model": prev},
+            "class_type": "LoraLoaderModelOnly",
+            "_meta": {"title": f"User LoRA: {name}"},
+        }
+        prev = [node_id, 0]
+        applied += 1
+    prompt[chain_target]["inputs"]["model"] = prev
+    if applied:
+        logger.info(f"🎨 Applied {applied} user LoRA(s)")
+    return applied
+
+
+def connect_ws():
+    """Wait for ComfyUI's HTTP server, then open a websocket. Returns the socket."""
+    http_url = f"http://{server_address}:8188/"
+    for http_attempt in range(180):
+        try:
+            urllib.request.urlopen(http_url, timeout=5)
+            logger.info(f"HTTP 연결 성공 (시도 {http_attempt+1})")
+            break
+        except Exception as e:
+            if http_attempt == 179:
+                raise Exception("ComfyUI 서버에 연결할 수 없습니다. 서버가 실행 중인지 확인하세요.")
+            logger.warning(f"HTTP 연결 실패 (시도 {http_attempt+1}/180): {e}")
+            time.sleep(1)
+
+    ws = websocket.WebSocket()
+    for attempt in range(int(180 / 5)):
+        try:
+            ws.connect(f"ws://{server_address}:8188/ws?clientId={client_id}")
+            logger.info(f"웹소켓 연결 성공 (시도 {attempt+1})")
+            return ws
+        except Exception as e:
+            if attempt == int(180 / 5) - 1:
+                raise Exception("웹소켓 연결 시간 초과 (3분)")
+            logger.warning(f"웹소켓 연결 실패 (시도 {attempt+1}): {e}")
+            time.sleep(5)
+
+
+def run_comfy_single_image(image_path, prompt_text, seed=None, model_ref=None,
+                           loras=None, width=None, height=None):
+    """Run the 1-image ComfyUI edit workflow once and return the result as base64.
+    Used per-person by the planned loop (and trivially reusable elsewhere)."""
+    workflow_path = os.path.join(_WORKFLOW_BASE, _WORKFLOW_FILES[1])
+    prompt = load_workflow(workflow_path)
+
+    prompt[_NODE_IMAGE_1]["inputs"]["image"] = image_path
+    prompt[_NODE_PROMPT]["inputs"]["prompt"] = prompt_text or ""
+    if _NODE_SEED in prompt and seed is not None:
+        prompt[_NODE_SEED]["inputs"]["seed"] = seed
+    if _NODE_WIDTH in prompt and width:
+        prompt[_NODE_WIDTH]["inputs"]["value"] = width
+    if _NODE_HEIGHT in prompt and height:
+        prompt[_NODE_HEIGHT]["inputs"]["value"] = height
+
+    inject_model(prompt, model_ref)
+    inject_loras(prompt, loras)
+
+    ws = connect_ws()
+    try:
+        images = get_images(ws, prompt)
+    finally:
+        ws.close()
+    for node_id in images:
+        if images[node_id]:
+            return images[node_id][0]
+    raise Exception("ComfyUI returned no image for this pass.")
+
+
+# ============================================================================
+# Planned per-subject pipeline: VLM planner → per-person iterative edit loop →
+# region compositing → upload. See qwen-edit-aging-pipeline-spec.md and PLANNER.md.
+# Triggered when the request sets pipeline="planned" or supplies a master_prompt.
+# ============================================================================
+def run_planned_edit(job_input, task_id):
+    import planner
+    import compositing as comp
+
+    # --- collect the single input image (path / url / base64) -----------------
+    if "image_path" in job_input:
+        src = process_input(job_input["image_path"], task_id, "input_image_1.jpg", "path")
+    elif "image_url" in job_input:
+        src = process_input(job_input["image_url"], task_id, "input_image_1.jpg", "url")
+    elif "image_base64" in job_input:
+        src = process_input(job_input["image_base64"], task_id, "input_image_1.jpg", "base64")
+    else:
+        return {"error": "planned pipeline needs one image (image_path / image_url / image_base64)."}
+
+    # Work in the editor's ~1MP space so planner bboxes line up with rendered output.
+    original = comp.load_image(src)
+    work_img = comp.scale_to_megapixels(original, 1.0)
+    work_dir = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), task_id))
+    os.makedirs(work_dir, exist_ok=True)
+    work_path = os.path.join(work_dir, "work.png")
+    work_img.save(work_path)
+
+    master_prompt = job_input.get("master_prompt") or planner.DEFAULT_MASTER_PROMPT
+    value_range = job_input.get("value_range") or job_input.get("age_range")
+    lora_options = job_input.get("lora_options") or {}
+    global_loras = _normalize_loras(job_input.get("loras"), job_input.get("lora"),
+                                    job_input.get("lora_strength", 1.0))
+    model_ref = job_input.get("model_name") or job_input.get("model_url") or job_input.get("model")
+    seed = job_input.get("seed")
+    max_people = int(job_input.get("max_people", 12))
+    edit_mode = job_input.get("edit_mode", "iterative")
+    temperature = float(job_input.get("planner_temperature", 0.9))
+    # How a per-person directive becomes the editor instruction. {directive} is required.
+    template = job_input.get("edit_instruction_template", "Apply this change to this person: {directive}")
+
+    # --- 1) plan ---------------------------------------------------------------
+    try:
+        people = planner.plan(
+            work_img, master_prompt=master_prompt, value_range=value_range,
+            lora_options=lora_options, seed=seed, temperature=temperature,
+            max_people=max_people,
+        )
+    except Exception as e:
+        logger.error(f"Planner failed: {e}")
+        return {"error": f"Planner stage failed: {e}"}
+    logger.info(f"🗺️  Planner produced {len(people)} person directive(s).")
+
+    def loras_for(person):
+        """Per-person LoRAs = the planner-selected labeled option (if any) + globals."""
+        chosen = []
+        label = person.get("lora_label")
+        if label and label in lora_options:
+            opt = lora_options[label]
+            chosen = opt if isinstance(opt, list) else [opt]
+        return [*chosen, *global_loras]
+
+    # --- 2) edit ---------------------------------------------------------------
+    if edit_mode == "single_pass":
+        # Cheaper, less reliable: one pass, all directives concatenated by position.
+        combined = "; ".join(
+            f"Person {p['person_id']} (left-to-right): {p['directive']}" for p in people
+        )
+        instruction = template.format(directive=combined) if "{directive}" in template else combined
+        # Single-pass can only use global LoRAs (no per-person split in one pass).
+        try:
+            out_b64 = run_comfy_single_image(
+                work_path, instruction, seed=seed, model_ref=model_ref, loras=global_loras)
+        except Exception as e:
+            return {"error": f"Editor (single_pass) failed: {e}"}
+        work_img = comp.b64_to_image(out_b64)
+        for p in people:
+            p["applied_seed"] = seed
+    else:
+        # Iterative (default): edit each person, composite ONLY their bbox back so
+        # untouched people stay pixel-exact and drift can't accumulate (spec §7).
+        for i, p in enumerate(people):
+            directive = p["directive"]
+            instruction = template.format(directive=directive) if "{directive}" in template else f"{template} {directive}"
+            pass_seed = None if seed is None else int(seed) + i  # vary per person, still reproducible
+            p["applied_seed"] = pass_seed
+            try:
+                out_b64 = run_comfy_single_image(
+                    work_path, instruction, seed=pass_seed, model_ref=model_ref,
+                    loras=loras_for(p))
+            except Exception as e:
+                return {"error": f"Editor failed on person {p['person_id']}: {e}"}
+            edited = comp.b64_to_image(out_b64)
+            work_img = comp.composite(work_img, edited, p["bbox"], feather=int(job_input.get("feather", 6)))
+            work_img.save(work_path)  # feed the composite into the next pass
+
+    # --- 3) return (caller may also upload to a volume/S3) --------------------
+    return {"image": comp.image_to_b64(work_img), "plan": people}
+
+
 def handler(job):
     job_input = job.get("input", {})
 
     logger.info(f"Received job input: {job_input}")
     task_id = f"task_{uuid.uuid4()}"
+
+    # ------------------------------
+    # Planned per-subject pipeline (VLM planner → per-person edit loop → composite).
+    # Opt in with pipeline="planned", or implicitly by supplying a master_prompt.
+    # Everything below this branch is the original single-instruction edit path,
+    # left untouched so existing callers (batch UI, gallery, etc.) keep working.
+    # ------------------------------
+    if job_input.get("pipeline") == "planned" or job_input.get("master_prompt"):
+        return run_planned_edit(job_input, task_id)
 
     # ------------------------------
     # 이미지 입력 수집 (1개 / 2개 / 3개)
@@ -319,112 +550,26 @@ def handler(job):
         prompt[_NODE_HEIGHT]["inputs"]["value"] = job_input["height"]
 
     # ------------------------------
-    # Custom base model (optional).
-    # Swap node 37's diffusion model. Pass a filename already staged on the volume
-    # (or image), or a URL to download+cache. Must be a Qwen-Image-Edit-compatible
-    # model, or the text-encoder/VAE nodes will mismatch.
-    #   "model_name": "my_qwen_finetune.safetensors"   (pre-staged)
-    #   "model_url":  "https://.../my_qwen_finetune.safetensors"  (download+cache; large!)
+    # Custom base model + LoRAs (optional). See inject_model / inject_loras above
+    # for the graph wiring. Model/LoRA refs may be a filename staged on the volume
+    # (or image) or a URL that's downloaded + cached onto the volume on first use.
+    #   "model_name": "my_qwen_finetune.safetensors"  | "model_url": "https://.../m.safetensors"
+    #   "loras": [ {"name": "x.safetensors", "strength": 1.0}, {"url": "...", "strength": 0.8} ]
+    #   "lora": "x.safetensors", "lora_strength": 1.0   (single convenience)
     # ------------------------------
     model_ref = job_input.get("model_name") or job_input.get("model_url") or job_input.get("model")
-    if model_ref and _NODE_MODEL in prompt:
-        try:
-            fname = ensure_model_file(model_ref, "diffusion_models")
-            if fname:
-                prompt[_NODE_MODEL]["inputs"]["unet_name"] = fname
-                logger.info(f"🧠 Using custom base model: {fname}")
-        except Exception as e:
-            return {"error": f"Failed to load model '{model_ref}': {e}"}
+    try:
+        inject_model(prompt, model_ref)
+    except Exception as e:
+        return {"error": f"Failed to load model '{model_ref}': {e}"}
 
-    # ------------------------------
-    # LoRA support (model-only).
-    # The base graph is: UNETLoader(37) -> LoraLoaderModelOnly(89, Lightning speed
-    # LoRA) -> ModelSamplingAuraFlow(66) -> ... -> KSampler.
-    # We stack user LoRAs ON TOP of the existing chain by inserting extra
-    # LoraLoaderModelOnly nodes right before node 66 (so the Lightning LoRA is kept).
-    # Each LoRA may be referenced by filename (staged on the volume/image) or by URL
-    # (downloaded + cached onto the volume on first use). Accepts:
-    #   "loras": [ {"name": "x.safetensors", "strength": 1.0},
-    #              {"url": "https://.../y.safetensors", "strength": 0.8} ]
-    #   "lora": "x.safetensors" (or a URL), "lora_strength": 1.0   (single convenience)
-    # ------------------------------
-    loras = job_input.get("loras")
-    if not loras and job_input.get("lora"):
-        loras = [{"name": job_input.get("lora"), "strength": job_input.get("lora_strength", 1.0)}]
+    try:
+        inject_loras(prompt, _normalize_loras(job_input.get("loras"), job_input.get("lora"),
+                                              job_input.get("lora_strength", 1.0)))
+    except Exception as e:
+        return {"error": f"Failed to load LoRA: {e}"}
 
-    if loras:
-        chain_target = _NODE_SAMPLING  # ModelSamplingAuraFlow consumes the model
-        if chain_target in prompt and "model" in prompt[chain_target].get("inputs", {}):
-            prev = prompt[chain_target]["inputs"]["model"]  # e.g. ["89", 0]
-            next_id = 9001
-            applied = 0
-            for lora in loras:
-                if isinstance(lora, dict):
-                    ref = lora.get("name") or lora.get("url")
-                    strength_raw = lora.get("strength", 1.0)
-                else:
-                    ref = lora
-                    strength_raw = 1.0
-                if not ref:
-                    continue
-                try:
-                    name = ensure_model_file(ref, "loras")
-                except Exception as e:
-                    return {"error": f"Failed to load LoRA '{ref}': {e}"}
-                if not name:
-                    continue
-                try:
-                    strength = float(strength_raw)
-                except (TypeError, ValueError):
-                    strength = 1.0
-                node_id = str(next_id)
-                next_id += 1
-                prompt[node_id] = {
-                    "inputs": {"lora_name": name, "strength_model": strength, "model": prev},
-                    "class_type": "LoraLoaderModelOnly",
-                    "_meta": {"title": f"User LoRA: {name}"},
-                }
-                prev = [node_id, 0]
-                applied += 1
-            prompt[chain_target]["inputs"]["model"] = prev
-            logger.info(f"🎨 Applied {applied} user LoRA(s)")
-        else:
-            logger.warning(f"Could not find node {_NODE_SAMPLING} to attach LoRAs; skipping LoRAs.")
-
-    ws_url = f"ws://{server_address}:8188/ws?clientId={client_id}"
-    logger.info(f"Connecting to WebSocket: {ws_url}")
-    
-    # 먼저 HTTP 연결이 가능한지 확인
-    http_url = f"http://{server_address}:8188/"
-    logger.info(f"Checking HTTP connection to: {http_url}")
-    
-    # HTTP 연결 확인 (최대 1분)
-    max_http_attempts = 180
-    for http_attempt in range(max_http_attempts):
-        try:
-            import urllib.request
-            response = urllib.request.urlopen(http_url, timeout=5)
-            logger.info(f"HTTP 연결 성공 (시도 {http_attempt+1})")
-            break
-        except Exception as e:
-            logger.warning(f"HTTP 연결 실패 (시도 {http_attempt+1}/{max_http_attempts}): {e}")
-            if http_attempt == max_http_attempts - 1:
-                raise Exception("ComfyUI 서버에 연결할 수 없습니다. 서버가 실행 중인지 확인하세요.")
-            time.sleep(1)
-    
-    ws = websocket.WebSocket()
-    # 웹소켓 연결 시도 (최대 3분)
-    max_attempts = int(180/5)  # 3분 (1초에 한 번씩 시도)
-    for attempt in range(max_attempts):
-        try:
-            ws.connect(ws_url)
-            logger.info(f"웹소켓 연결 성공 (시도 {attempt+1})")
-            break
-        except Exception as e:
-            logger.warning(f"웹소켓 연결 실패 (시도 {attempt+1}/{max_attempts}): {e}")
-            if attempt == max_attempts - 1:
-                raise Exception("웹소켓 연결 시간 초과 (3분)")
-            time.sleep(5)
+    ws = connect_ws()
     images = get_images(ws, prompt)
     ws.close()
 
