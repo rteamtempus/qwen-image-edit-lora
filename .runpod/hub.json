@@ -10,7 +10,6 @@
       "containerDiskInGb": 180,
   
       "gpuCount": 1,
-      "_comment_gpu": "Editor only (no VLM) — runs comfortably on 24GB. The planner lives in the separate qwen-vl endpoint.",
       "gpuIds": "ADA_24,ADA_32_PRO",
       "allowedCudaVersions": [
         "12.8"

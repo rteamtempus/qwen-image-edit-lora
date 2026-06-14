@@ -76,16 +76,9 @@ runpod_volume:
 YAML
 fi
 
-# Start ComfyUI in the background.
-# NOTE: black/empty output ("invalid value encountered in cast" at VAE decode) is a
-# NaN in the pipeline. Two common triggers with the fp8 Qwen-Image model:
-#   1) --use-sage-attention — its kernels are GPU-arch specific and can emit NaNs
-#      (especially right after a GPU change). Dropped here; ComfyUI falls back to a
-#      stable attention backend. Re-add it later if you want the speed back and it's
-#      confirmed stable on your GPU.
-#   2) fp16 VAE overflow — forcing the VAE to fp32 avoids NaN at decode.
+# Start ComfyUI in the background
 echo "Starting ComfyUI in the background..."
-python /ComfyUI/main.py --listen --fp32-vae &
+python /ComfyUI/main.py --listen --use-sage-attention &
 
 # Wait for ComfyUI to be ready
 echo "Waiting for ComfyUI to be ready..."
