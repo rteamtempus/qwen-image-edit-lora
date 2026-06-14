@@ -7,10 +7,10 @@ This project is a template designed to easily deploy and use an image editing wo
 
 The template performs prompt-guided image editing using ComfyUI workflows. It supports one, two, or three input images and accepts inputs as path, URL, or Base64.
 
-> **Per-subject randomized edits (aging & more):** a VLM-planner pipeline edits each
-> person in a group photo by a randomized, individually-grounded amount from a single
-> reusable master prompt. See **[PLANNER.md](PLANNER.md)**. It's opt-in (`pipeline:"planned"`
-> or supply a `master_prompt`); the standard single-instruction edit below is unchanged.
+> **Per-subject randomized edits (aging & more):** the VLM planner that drives those
+> lives in a separate endpoint (the **qwen-vl** repo). The consumer app calls it to
+> get a per-person plan, then sends one single-pass edit to this editor. This image
+> is editor-only and runs on 24GB.
 
 ## 🎨 Engui Studio Integration
 

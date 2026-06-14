@@ -10,8 +10,8 @@
       "containerDiskInGb": 180,
   
       "gpuCount": 1,
-      "_comment_gpu": "Editor alone runs on 24GB. The planned pipeline keeps the Qwen3-VL planner + editor co-resident — prefer 48GB (L40S/A6000) for headroom. Larger tiers listed first so the planned path gets enough VRAM.",
-      "gpuIds": "ADA_48_PRO,ADA_32_PRO,ADA_24",
+      "_comment_gpu": "Editor only (no VLM) — runs comfortably on 24GB. The planner lives in the separate qwen-vl endpoint.",
+      "gpuIds": "ADA_24,ADA_32_PRO",
       "allowedCudaVersions": [
         "12.8"
       ]
