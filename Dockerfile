@@ -45,9 +45,10 @@ COPY my_loras/ /ComfyUI/models/loras/
 # the build stays under the time limit. To add/remove a baked LoRA, edit these
 # lines AND the KNOWN_LORAS chips in the app. Reference each by filename.
 RUN set -e; \
-    wget -q "https://huggingface.co/Rt5556/qwen-loras/resolve/main/lora_1.safetensors"    -O /ComfyUI/models/loras/lora_1.safetensors    & p1=$!; \
-    wget -q "https://huggingface.co/Rt5556/qwen-loras/resolve/main/BNElora_2.safetensors" -O /ComfyUI/models/loras/BNElora_2.safetensors & p2=$!; \
-    wait $p1; wait $p2
+    wget -q "https://huggingface.co/Rt5556/qwen-loras/resolve/main/lora_1.safetensors"           -O /ComfyUI/models/loras/lora_1.safetensors           & p1=$!; \
+    wget -q "https://huggingface.co/Rt5556/qwen-loras/resolve/main/BNElora_2.safetensors"        -O /ComfyUI/models/loras/BNElora_2.safetensors        & p2=$!; \
+    wget -q "https://huggingface.co/Rt5556/qwen-loras/resolve/main/qwen_MCNL_v1.0.safetensors"   -O /ComfyUI/models/loras/qwen_MCNL_v1.0.safetensors   & p3=$!; \
+    wait $p1; wait $p2; wait $p3
 # ============================================================================
 
 COPY . .
